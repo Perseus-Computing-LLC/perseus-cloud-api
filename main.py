@@ -369,6 +369,12 @@ async def password_reset_confirm(request: Request) -> JSONResponse:
     return await accounts.handle_password_reset_confirm(request)
 
 
+@app.get("/api/accounts/onboarding")
+async def account_onboarding(request: Request) -> JSONResponse:
+    """Return the authenticated tenant's canonical Cloud onboarding contract."""
+    return await accounts.handle_onboarding(request)
+
+
 @app.post("/api/accounts/api-keys")
 async def create_user_api_key(request: Request) -> JSONResponse:
     """Create an API key for the authenticated user."""
