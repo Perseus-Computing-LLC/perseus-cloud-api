@@ -26,6 +26,7 @@ from database import (
     create_session,
     get_session,
     delete_session,
+    onboarding_plan,
 )
 from database import create_api_key as db_create_api_key
 
@@ -160,12 +161,24 @@ async def handle_register(request: Request) -> JSONResponse:
     body = await request.json()
     email = (body.get("email", "") or "").strip().lower()
     password = body.get("password", "") or ""
+    requested_seats = body.get("seats", 1)
+    requested_plan = (body.get("plan", "free") or "free").lower()
 
     # Validation
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email is required")
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    try:
+        onboarding = onboarding_plan(requested_plan, requested_seats)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=402, detail=str(exc))
+    if onboarding["plan"] != "free":
+        raise HTTPException(
+            status_code=402,
+            detail="Paid plans require checkout before activation; Free signup supports up to 10 seats.",
+            headers={"X-Upgrade-Required": "true"},
+        )
 
     # Check for duplicate
     existing = await get_user_by_email(email)
@@ -181,7 +194,10 @@ async def handle_register(request: Request) -> JSONResponse:
     # Create user
     password_hash = hash_password(password)
     tenant_id = make_tenant_id()
-    user_id = await create_user(email, password_hash, tenant_id)
+    user_id = await create_user(
+        email, password_hash, tenant_id,
+        plan=onboarding["plan"], seat_count=onboarding["seat_count"],
+    )
 
     # Generate verification token
     ver_token = make_verification_token()
@@ -204,6 +220,12 @@ async def handle_register(request: Request) -> JSONResponse:
     return JSONResponse({
         "message": "Account created. Check your email to verify your address.",
         "email_sent": email_sent,
+        "tenant_id": tenant_id,
+        "onboarding": {
+            **onboarding,
+            "audit_endpoint": "/api/v1/audit",
+            "savings_tally": "enabled after the first verified usage event",
+        },
     }, status_code=201)
 
 
@@ -339,6 +361,23 @@ async def handle_password_reset_confirm(request: Request) -> JSONResponse:
     logger.info("password_reset", extra={"user_id": row["user_id"]})
 
     return JSONResponse({"message": "Password reset successfully. You can now log in."})
+
+
+async def handle_onboarding(request: Request) -> JSONResponse:
+    """GET /api/accounts/onboarding — return the authenticated tenant contract."""
+    user = await authenticate_user(request)
+    plan = user.get("plan", "free")
+    seats = int(user.get("seat_count", 1))
+    onboarding = onboarding_plan(plan, seats)
+    return JSONResponse({
+        "tenant_id": user["tenant_id"],
+        "email_verified": bool(user["is_verified"]),
+        "onboarding": {
+            **onboarding,
+            "audit_endpoint": "/api/v1/audit",
+            "savings_tally": "enabled after the first verified usage event",
+        },
+    })
 
 
 async def handle_api_key_create(request: Request) -> JSONResponse:

@@ -83,6 +83,15 @@ async def init_db() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+        # Additive onboarding columns for existing deployments.
+        for column, definition in (
+            ("plan", "TEXT NOT NULL DEFAULT 'free'"),
+            ("seat_count", "INTEGER NOT NULL DEFAULT 1"),
+        ):
+            try:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+            except Exception:
+                pass  # already migrated
         await db.commit()
     finally:
         await db.close()
@@ -109,6 +118,40 @@ TIER_LIMITS = {
         "priority": True,
     },
 }
+
+
+# Canonical Cloud onboarding contract. Billing remains in Plutus; this metadata
+# lets signup and the Cloud API render the same rules without reimplementing math.
+CLOUD_PLAN_CONTRACT = {
+    "free": {"max_seats": 10, "seat_price_usd": 0.0,
+             "donation_bps": 500, "savings_share_bps": 0,
+             "audit_access": True},
+    "team": {"min_seats": 11, "seat_price_usd": 20.0,
+             "donation_bps": 0, "savings_share_bps": 0,
+             "audit_access": True},
+    "enterprise": {"seat_price_usd": None, "donation_bps": 0,
+                    "savings_share_bps": 1000, "audit_access": True},
+}
+
+
+def onboarding_plan(plan: str = "free", seats: int = 1) -> dict:
+    plan = (plan or "free").lower()
+    if plan not in CLOUD_PLAN_CONTRACT:
+        raise ValueError(f"unsupported onboarding plan: {plan}")
+    seats = int(seats)
+    if seats < 1:
+        raise ValueError("seat_count must be at least 1")
+    spec = dict(CLOUD_PLAN_CONTRACT[plan])
+    if plan == "free" and seats > spec["max_seats"]:
+        raise ValueError("Free supports up to 10 seats; choose Team for 11+ seats")
+    if plan == "team" and seats < spec["min_seats"]:
+        raise ValueError("Team requires at least 11 seats")
+    spec.update({"plan": plan, "seat_count": seats})
+    spec["monthly_seat_charge_usd"] = (
+        None if spec["seat_price_usd"] is None
+        else round(seats * spec["seat_price_usd"], 2)
+    )
+    return spec
 
 
 # ── API Key Operations ──────────────────────────────────────────────────────
@@ -244,14 +287,16 @@ def check_tier_limits(tier: str, usage: dict) -> tuple[bool, str | None]:
 
 # ── User Account Operations ─────────────────────────────────────────────────
 
-async def create_user(email: str, password_hash: str, tenant_id: str) -> int:
-    """Create a new user. Returns user_id. Raises ValueError on duplicate email."""
+async def create_user(email: str, password_hash: str, tenant_id: str,
+                     plan: str = "free", seat_count: int = 1) -> int:
+    """Create a new user and initialize its Cloud onboarding contract."""
+    onboarding = onboarding_plan(plan, seat_count)
     db = await get_db()
     try:
         try:
             cursor = await db.execute(
-                "INSERT INTO users (email, password_hash, tenant_id) VALUES (?, ?, ?)",
-                (email, password_hash, tenant_id),
+                "INSERT INTO users (email, password_hash, tenant_id, plan, seat_count) VALUES (?, ?, ?, ?, ?)",
+                (email, password_hash, tenant_id, onboarding["plan"], onboarding["seat_count"]),
             )
             await db.commit()
             return cursor.lastrowid
@@ -267,7 +312,7 @@ async def get_user_by_email(email: str) -> dict | None:
     try:
         cursor = await db.execute(
             "SELECT id, email, password_hash, is_verified, tenant_id, stripe_customer_id, "
-            "created_at, updated_at FROM users WHERE email = ?",
+            "plan, seat_count, created_at, updated_at FROM users WHERE email = ?",
             (email,),
         )
         row = await cursor.fetchone()
@@ -282,7 +327,7 @@ async def get_user_by_id(user_id: int) -> dict | None:
     try:
         cursor = await db.execute(
             "SELECT id, email, password_hash, is_verified, tenant_id, stripe_customer_id, "
-            "created_at, updated_at FROM users WHERE id = ?",
+            "plan, seat_count, created_at, updated_at FROM users WHERE id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
