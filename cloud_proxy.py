@@ -38,6 +38,8 @@ def proxy_request(handler, parsed) -> bool:
             headers={
                 "Content-Type": handler.headers.get("Content-Type", "application/json"),
                 "X-API-Key": handler.headers.get("X-API-Key", ""),
+                "Authorization": handler.headers.get("Authorization", ""),
+                "Cookie": handler.headers.get("Cookie", ""),
                 "Accept": "application/json",
             },
         )
