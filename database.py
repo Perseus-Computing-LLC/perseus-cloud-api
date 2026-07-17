@@ -1,9 +1,11 @@
 """
-database.py — SQLite database for API keys, usage tracking, and subscription state.
+database.py — SQLite database for API keys, usage tracking, subscription state, and user accounts.
 
 Tables:
   - api_keys:    key, tier, stripe_customer_id, stripe_subscription_id, created_at
   - usage:       api_key, entity_count, workspace_count, last_reset
+  - users:       id, email, password_hash, is_verified, tenant_id, created_at, updated_at
+  - verification_tokens:  id, user_id, token, token_type, expires_at, used
 """
 
 import aiosqlite
@@ -46,6 +48,41 @@ async def init_db() -> None:
                 FOREIGN KEY (api_key) REFERENCES api_keys(key)
             )
         """)
+        # User accounts
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_verified INTEGER NOT NULL DEFAULT 0,
+                tenant_id TEXT UNIQUE NOT NULL,
+                stripe_customer_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS verification_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token TEXT UNIQUE NOT NULL,
+                token_type TEXT NOT NULL DEFAULT 'email_verification',
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                session_token TEXT UNIQUE NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
         await db.commit()
     finally:
         await db.close()
@@ -73,6 +110,8 @@ TIER_LIMITS = {
     },
 }
 
+
+# ── API Key Operations ──────────────────────────────────────────────────────
 
 async def get_api_key_info(key: str) -> dict | None:
     """Get API key details or None if not found/inactive."""
@@ -201,3 +240,158 @@ def check_tier_limits(tier: str, usage: dict) -> tuple[bool, str | None]:
     if max_workspaces and workspace_count >= max_workspaces:
         return False, f"Workspace limit reached ({workspace_count}/{max_workspaces}). Upgrade your plan."
     return True, None
+
+
+# ── User Account Operations ─────────────────────────────────────────────────
+
+async def create_user(email: str, password_hash: str, tenant_id: str) -> int:
+    """Create a new user. Returns user_id. Raises ValueError on duplicate email."""
+    db = await get_db()
+    try:
+        try:
+            cursor = await db.execute(
+                "INSERT INTO users (email, password_hash, tenant_id) VALUES (?, ?, ?)",
+                (email, password_hash, tenant_id),
+            )
+            await db.commit()
+            return cursor.lastrowid
+        except aiosqlite.IntegrityError:
+            raise ValueError(f"Email already registered: {email}")
+    finally:
+        await db.close()
+
+
+async def get_user_by_email(email: str) -> dict | None:
+    """Get user by email or None."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, email, password_hash, is_verified, tenant_id, stripe_customer_id, "
+            "created_at, updated_at FROM users WHERE email = ?",
+            (email,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def get_user_by_id(user_id: int) -> dict | None:
+    """Get user by ID or None."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, email, password_hash, is_verified, tenant_id, stripe_customer_id, "
+            "created_at, updated_at FROM users WHERE id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def verify_user_email(user_id: int) -> None:
+    """Mark a user's email as verified."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE users SET is_verified = 1, updated_at = datetime('now') WHERE id = ?",
+            (user_id,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def update_user_password(user_id: int, password_hash: str) -> None:
+    """Update a user's password hash."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?",
+            (password_hash, user_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+# ── Verification Token Operations ───────────────────────────────────────────
+
+async def create_verification_token(user_id: int, token: str, token_type: str,
+                                    expires_at: str) -> None:
+    """Create a verification/reset token."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO verification_tokens (user_id, token, token_type, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, token, token_type, expires_at),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def consume_verification_token(token: str, token_type: str) -> dict | None:
+    """Consume a verification token and return the token row if valid/unexpired/unused.
+    Returns None if invalid/expired/already-used."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, user_id, token, token_type, expires_at, used FROM verification_tokens "
+            "WHERE token = ? AND token_type = ? AND used = 0 AND expires_at > datetime('now')",
+            (token, token_type),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        # Mark as used
+        await db.execute(
+            "UPDATE verification_tokens SET used = 1 WHERE id = ?", (row["id"],)
+        )
+        await db.commit()
+        return dict(row)
+    finally:
+        await db.close()
+
+
+# ── Session Operations ──────────────────────────────────────────────────────
+
+async def create_session(user_id: int, session_token: str, expires_at: str) -> None:
+    """Create a new session."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO sessions (user_id, session_token, expires_at) VALUES (?, ?, ?)",
+            (user_id, session_token, expires_at),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_session(session_token: str) -> dict | None:
+    """Get session by token. Returns None if expired or not found."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, user_id, session_token, expires_at, created_at FROM sessions "
+            "WHERE session_token = ? AND expires_at > datetime('now')",
+            (session_token,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        await db.close()
+
+
+async def delete_session(session_token: str) -> None:
+    """Delete a session (logout)."""
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM sessions WHERE session_token = ?", (session_token,))
+        await db.commit()
+    finally:
+        await db.close()

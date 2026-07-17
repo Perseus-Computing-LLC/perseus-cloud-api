@@ -35,6 +35,7 @@ from database import (
     TIER_LIMITS,
 )
 from mimir_client import mimir_client
+import accounts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("perseus_cloud")
@@ -321,6 +322,57 @@ async def usage(request: Request, key_info: dict = Depends(authenticate)) -> JSO
             "priority": limits["priority"],
         },
     })
+
+
+# ── Account Management Endpoints ──────────────────────────────────────────────
+
+
+@app.post("/api/accounts/register")
+async def register(request: Request) -> JSONResponse:
+    """Register a new user account. Sends verification email."""
+    return await accounts.handle_register(request)
+
+
+@app.get("/api/accounts/verify")
+async def verify_email(request: Request) -> JSONResponse:
+    """Verify email address with token."""
+    return await accounts.handle_verify_email(request)
+
+
+@app.post("/api/accounts/login")
+async def login(request: Request) -> JSONResponse:
+    """Login with email and password. Returns session token + sets cookie."""
+    return await accounts.handle_login(request)
+
+
+@app.post("/api/accounts/logout")
+async def logout(request: Request) -> JSONResponse:
+    """Logout and invalidate session."""
+    return await accounts.handle_logout(request)
+
+
+@app.get("/api/accounts/me")
+async def me(request: Request) -> JSONResponse:
+    """Get current authenticated user."""
+    return await accounts.handle_me(request)
+
+
+@app.post("/api/accounts/password-reset")
+async def password_reset_request(request: Request) -> JSONResponse:
+    """Request a password reset email."""
+    return await accounts.handle_password_reset_request(request)
+
+
+@app.post("/api/accounts/password-reset/confirm")
+async def password_reset_confirm(request: Request) -> JSONResponse:
+    """Confirm password reset with token."""
+    return await accounts.handle_password_reset_confirm(request)
+
+
+@app.post("/api/accounts/api-keys")
+async def create_user_api_key(request: Request) -> JSONResponse:
+    """Create an API key for the authenticated user."""
+    return await accounts.handle_api_key_create(request)
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
