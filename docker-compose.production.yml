@@ -36,6 +36,7 @@ services:
       - serve
       - --host
       - 0.0.0.0
+      - --allow-insecure
       - --port
       - "8420"
     environment:
