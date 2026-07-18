@@ -36,9 +36,10 @@ services:
       - serve
       - --host
       - 0.0.0.0
-      - --allow-insecure
       - --port
       - "8420"
+    env_file:
+      - plutus.env
     environment:
       PLUTUS_DB: /data/plutus.db
       PLUTUS_CONFIG: /data/config.yaml
