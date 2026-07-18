@@ -19,6 +19,7 @@ import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import stripe_handler
@@ -59,6 +60,22 @@ app = FastAPI(
     description="Hosted Mimir Persistent Memory — paid API with Stripe subscriptions",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# The static Cloud site is served from perseus.observer while the API is exposed
+# at cloud-api.perseus.observer. Keep the browser boundary explicit rather than
+# falling back to a permissive wildcard origin.
+_cors_origins = [
+    origin.strip() for origin in os.getenv(
+        "CORS_ALLOW_ORIGINS", "https://perseus.observer"
+    ).split(",") if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

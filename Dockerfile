@@ -1,23 +1,25 @@
-# Perseus Cloud API — Cloud Run Dockerfile
-# Multi-stage build: Python API + Mimir binary
-
-FROM rust:1.80-slim AS mimir-builder
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-WORKDIR /build
-COPY mimir-repo/ .
-RUN cargo build --release && cp target/release/mimir /mimir
-
+# Perseus Cloud API — self-contained production image.
+# The released Vault binary avoids requiring a private source checkout during
+# deployment and gives the API the same tested MCP server used elsewhere.
 FROM python:3.12-slim
 
-# Install runtime dependencies
+ARG PERSEUS_VAULT_VERSION=2.20.2
+
+# Install runtime dependencies and the verified Vault release binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
+    tar \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy Mimir binary
-COPY --from=mimir-builder /mimir /usr/local/bin/mimir
+RUN curl --fail --location --retry 3 \
+      "https://github.com/Perseus-Computing-LLC/perseus-vault/releases/download/v${PERSEUS_VAULT_VERSION}/perseus-vault-x86_64-unknown-linux-gnu.tar.gz" \
+      -o /tmp/perseus-vault.tar.gz \
+    && tar -xzf /tmp/perseus-vault.tar.gz -C /tmp \
+    && install -m 0755 "$(find /tmp -type f -name perseus-vault -print -quit)" /usr/local/bin/perseus-vault \
+    && rm -rf /tmp/perseus-vault /tmp/perseus-vault.tar.gz
 
 # Install Python dependencies
 COPY requirements.txt .
@@ -31,8 +33,8 @@ RUN mkdir -p /data
 
 # Cloud Run sets PORT env var
 ENV PORT=8080
-ENV MIMIR_BINARY_PATH=/usr/local/bin/mimir
-ENV MIMIR_DB_PATH=/data/mimir.db
+ENV MIMIR_BINARY_PATH=/usr/local/bin/perseus-vault
+ENV MIMIR_DB_PATH=/data/perseus-vault.db
 ENV DATABASE_PATH=/data/perseus_cloud.db
 
 EXPOSE 8080
