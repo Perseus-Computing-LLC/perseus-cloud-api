@@ -32,7 +32,16 @@ from database import create_api_key as db_create_api_key
 
 logger = logging.getLogger("perseus_cloud.accounts")
 
-# ── Configuration ────────────────────────────────────────────────────────────
+
+def _redact_email(email: str) -> str:
+    """Return a diagnostic-safe email label without retaining user PII."""
+    local, sep, domain = email.partition("@")
+    if not sep:
+        return "invalid-email"
+    return f"{local[:1]}***@{domain}"
+
+
+# ── Configuration
 
 JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
@@ -73,7 +82,9 @@ async def send_email(to: str, subject: str, body: str) -> bool:
             logger.error("send_email_failed", extra={"error": str(e)})
             return False
     else:
-        logger.info("email_would_send", extra={"to": to, "subject": subject, "body": body[:200]})
+        logger.info("email_would_send", extra={
+            "to": _redact_email(to), "subject": subject, "body_length": len(body),
+        })
         return True
 
 
@@ -215,7 +226,9 @@ async def handle_register(request: Request) -> JSONResponse:
         f"If you did not create this account, you can ignore this email.",
     )
 
-    logger.info("user_registered", extra={"user_id": user_id, "email": email, "email_sent": email_sent})
+    logger.info("user_registered", extra={
+        "user_id": user_id, "email": _redact_email(email), "email_sent": email_sent,
+    })
 
     return JSONResponse({
         "message": "Account created. Check your email to verify your address.",
@@ -266,7 +279,7 @@ async def handle_login(request: Request) -> JSONResponse:
     expires = (datetime.now(timezone.utc) + timedelta(hours=SESSION_EXPIRY_HOURS)).isoformat()
     await create_session(user["id"], session_token, expires)
 
-    logger.info("user_login", extra={"user_id": user["id"], "email": email})
+    logger.info("user_login", extra={"user_id": user["id"], "email": _redact_email(email)})
 
     resp = JSONResponse({
         "token": session_token,
