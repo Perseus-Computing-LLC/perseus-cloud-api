@@ -82,10 +82,10 @@ async def send_email(to: str, subject: str, body: str) -> bool:
             logger.error("send_email_failed", extra={"error": str(e)})
             return False
     else:
-        logger.info("email_would_send", extra={
+        logger.warning("email_not_sent", extra={
             "to": _redact_email(to), "subject": subject, "body_length": len(body),
         })
-        return True
+        return False
 
 
 # ── Token helpers ────────────────────────────────────────────────────────────
