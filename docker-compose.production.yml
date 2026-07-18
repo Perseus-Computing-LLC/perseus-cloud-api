@@ -1,0 +1,64 @@
+services:
+  cloud-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: perseus-cloud-api:6bb1779
+    container_name: perseus-cloud-api
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+    volumes:
+      - ./data:/data
+    networks:
+      - media-net
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+
+  plutus:
+    image: ghcr.io/perseus-computing-llc/plutus:latest
+    container_name: plutus
+    entrypoint:
+      - plutus
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8420"
+    environment:
+      PLUTUS_DB: /data/plutus.db
+      PLUTUS_CONFIG: /data/config.yaml
+    volumes:
+      - ./plutus-data:/data
+    networks:
+      - media-net
+    expose:
+      - "8420"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8420/healthz', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+networks:
+  media-net:
+    external: true
