@@ -12,6 +12,7 @@ Endpoints:
   GET  /api/v1/entities/{id} - Proxy to mimir_get_entity (auth required)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ import accounts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("perseus_cloud")
+_mimir_reconnect_lock = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -192,7 +194,17 @@ async def stripe_webhook(request: Request) -> JSONResponse:
 
 @app.get("/api/health")
 async def health() -> dict:
-    """Health check endpoint."""
+    """Health check endpoint with one serialized Vault reconnect attempt."""
+    if not mimir_client.is_connected:
+        async with _mimir_reconnect_lock:
+            if not mimir_client.is_connected:
+                logger.warning("Vault connection lost; attempting health-check reconnect")
+                await mimir_client.stop()
+                try:
+                    await mimir_client.start()
+                except Exception as exc:
+                    logger.error("Vault reconnect failed: %s", type(exc).__name__)
+
     mimir_healthy = mimir_client.is_connected
     return {
         "status": "healthy" if mimir_healthy else "degraded",

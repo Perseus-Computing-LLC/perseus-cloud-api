@@ -39,4 +39,6 @@ ENV DATABASE_PATH=/data/perseus_cloud.db
 
 EXPOSE 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Verification links carry one-time tokens in their query strings. Disable
+# Uvicorn's raw access log so those secrets never reach container log storage.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
