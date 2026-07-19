@@ -83,6 +83,19 @@ async def init_db() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS funnel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'unknown',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_funnel_events_created
+            ON funnel_events(created_at, event_name)
+        """)
         # Additive onboarding columns for existing deployments.
         for column, definition in (
             ("plan", "TEXT NOT NULL DEFAULT 'free'"),
@@ -93,6 +106,49 @@ async def init_db() -> None:
             except Exception:
                 pass  # already migrated
         await db.commit()
+    finally:
+        await db.close()
+
+
+FUNNEL_EVENTS = frozenset({
+    "signup_created",
+    "email_verified",
+    "login_succeeded",
+    "dashboard_opened",
+    "plutus_audit_link_clicked",
+    "first_usage_recorded",
+    "savings_available",
+    "optional_donation_started",
+    "optional_donation_completed",
+})
+
+
+async def record_funnel_event(tenant_id: str, event_name: str, source: str = "unknown") -> None:
+    """Persist only allowlisted funnel metadata; never accept arbitrary payloads."""
+    if event_name not in FUNNEL_EVENTS:
+        raise ValueError("unsupported funnel event")
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO funnel_events(tenant_id, event_name, source) VALUES (?, ?, ?)",
+            (tenant_id, event_name, source[:64]),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_funnel_metrics(days: int = 7) -> dict[str, int]:
+    """Return aggregate event counts for the requested recent window."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            """SELECT event_name, COUNT(*) AS count FROM funnel_events
+               WHERE created_at >= datetime('now', ?) GROUP BY event_name""",
+            (f"-{max(1, int(days))} days",),
+        )
+        rows = await cursor.fetchall()
+        return {row["event_name"]: row["count"] for row in rows}
     finally:
         await db.close()
 
