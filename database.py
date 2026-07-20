@@ -122,11 +122,18 @@ TIER_LIMITS = {
 
 # Canonical Cloud onboarding contract. Billing remains in Plutus; this metadata
 # lets signup and the Cloud API render the same rules without reimplementing math.
+#
+# Pricing anchored 2026-07-20 per competitive-intel sweep (Vault:
+# competitive-intel/landscape-2026-07-20): GitHub bundles team memory +
+# governance free on the $19 Copilot Business seat, and Kiro charges zero
+# premium for team plans — dashboards/SSO/analytics are table stakes, so Team
+# is priced as an add-on band (~25-50% of a base assistant seat) with a
+# small-team monthly floor, and margin lives at Enterprise.
 CLOUD_PLAN_CONTRACT = {
     "free": {"max_seats": 10, "seat_price_usd": 0.0,
              "donation_bps": 500, "savings_share_bps": 0,
              "audit_access": True},
-    "team": {"min_seats": 11, "seat_price_usd": 20.0,
+    "team": {"min_seats": 1, "seat_price_usd": 10.0, "min_monthly_usd": 49.0,
              "donation_bps": 0, "savings_share_bps": 0,
              "audit_access": True},
     "enterprise": {"seat_price_usd": None, "donation_bps": 0,
@@ -143,14 +150,18 @@ def onboarding_plan(plan: str = "free", seats: int = 1) -> dict:
         raise ValueError("seat_count must be at least 1")
     spec = dict(CLOUD_PLAN_CONTRACT[plan])
     if plan == "free" and seats > spec["max_seats"]:
-        raise ValueError("Free supports up to 10 seats; choose Team for 11+ seats")
+        raise ValueError("Free supports up to 10 seats; larger teams need Team")
     if plan == "team" and seats < spec["min_seats"]:
-        raise ValueError("Team requires at least 11 seats")
+        raise ValueError(f"Team requires at least {spec['min_seats']} seat(s)")
     spec.update({"plan": plan, "seat_count": seats})
-    spec["monthly_seat_charge_usd"] = (
-        None if spec["seat_price_usd"] is None
-        else round(seats * spec["seat_price_usd"], 2)
-    )
+    if spec["seat_price_usd"] is None:
+        spec["monthly_seat_charge_usd"] = None
+    else:
+        charge = round(seats * spec["seat_price_usd"], 2)
+        floor = spec.get("min_monthly_usd")
+        if floor is not None:
+            charge = max(charge, floor)
+        spec["monthly_seat_charge_usd"] = charge
     return spec
 
 
