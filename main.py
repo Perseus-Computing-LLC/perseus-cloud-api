@@ -38,6 +38,7 @@ from database import (
 )
 from mimir_client import mimir_client
 import accounts
+import funnel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("perseus_cloud")
@@ -260,8 +261,11 @@ async def remember(request: Request, key_info: dict = Depends(authenticate)) -> 
     if err:
         raise HTTPException(status_code=500, detail=f"Mimir error: {err}")
 
-    # Track usage
+    # Track usage; a 0→1 transition is the tenant's first_usage_recorded (#4).
+    prior = await get_usage(key_info["key"])
     await increment_entity_count(key_info["key"], 1)
+    if prior.get("entity_count", 0) == 0 and key_info.get("tenant_id"):
+        await funnel.try_record(key_info["tenant_id"], "first_usage_recorded", "api")
 
     return JSONResponse(result or {"status": "stored"})
 
@@ -408,6 +412,18 @@ async def account_onboarding(request: Request) -> JSONResponse:
 async def create_user_api_key(request: Request) -> JSONResponse:
     """Create an API key for the authenticated user."""
     return await accounts.handle_api_key_create(request)
+
+
+@app.post("/api/accounts/audit-link-click")
+async def audit_link_click(request: Request) -> JSONResponse:
+    """Record a Plutus audit-link click for the authenticated tenant."""
+    return await accounts.handle_audit_link_click(request)
+
+
+@app.get("/api/operator/funnel")
+async def operator_funnel(request: Request) -> JSONResponse:
+    """Operator-only aggregate activation funnel report (issue #4)."""
+    return await funnel.handle_funnel_report(request)
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
