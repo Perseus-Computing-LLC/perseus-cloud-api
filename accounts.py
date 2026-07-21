@@ -29,6 +29,7 @@ from database import (
     onboarding_plan,
 )
 from database import create_api_key as db_create_api_key
+import funnel
 
 logger = logging.getLogger("perseus_cloud.accounts")
 
@@ -56,12 +57,26 @@ SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "noreply@perseus.observer")
 BASE_URL = os.getenv("API_BASE_URL", "https://perseus-cloud-api.run.app")
 
+# Founder welcome email (issue #7): plain text, founder-signed, reply to a human.
+FOUNDER_FROM_EMAIL = os.getenv("FOUNDER_FROM_EMAIL", "thomas@perseus.observer")
+FOUNDER_REPLY_TO = os.getenv("FOUNDER_REPLY_TO", "thomas@perseus.observer")
+WELCOME_EMAIL_ENABLED = os.getenv("WELCOME_EMAIL_ENABLED", "true").lower() in ("1", "true", "yes")
 
-async def send_email(to: str, subject: str, body: str) -> bool:
+
+async def send_email(to: str, subject: str, body: str,
+                     from_email: str | None = None, reply_to: str | None = None) -> bool:
     """Send email. Uses SendGrid if configured, otherwise logs to stdout."""
     if SENDGRID_API_KEY:
         try:
             import httpx
+            payload = {
+                "personalizations": [{"to": [{"email": to}]}],
+                "from": {"email": from_email or FROM_EMAIL},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": body}],
+            }
+            if reply_to:
+                payload["reply_to"] = {"email": reply_to}
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     "https://api.sendgrid.com/v3/mail/send",
@@ -69,12 +84,7 @@ async def send_email(to: str, subject: str, body: str) -> bool:
                         "Authorization": f"Bearer {SENDGRID_API_KEY}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "personalizations": [{"to": [{"email": to}]}],
-                        "from": {"email": FROM_EMAIL},
-                        "subject": subject,
-                        "content": [{"type": "text/plain", "value": body}],
-                    },
+                    json=payload,
                     timeout=10,
                 )
                 return resp.status_code == 202
@@ -86,6 +96,38 @@ async def send_email(to: str, subject: str, body: str) -> bool:
             "to": _redact_email(to), "subject": subject, "body_length": len(body),
         })
         return False
+
+
+async def send_founder_welcome(email: str) -> bool:
+    """Founder-signed plain-text welcome with a single question CTA (#7).
+
+    Deliberately short and untemplated — it should read like a human typed it.
+    No name merge field exists in the signup flow, so the greeting is the
+    safe fallback by construction ('Hi there'), never a broken 'Hi ,'.
+    """
+    if not WELCOME_EMAIL_ENABLED:
+        return False
+    body = (
+        "Hi there,\n\n"
+        "I'm Thomas, the founder of Perseus — thanks for signing up for Perseus Cloud. "
+        "I read every reply to this address personally.\n\n"
+        "What are you building? One sentence is plenty, and it directly shapes what we "
+        "prioritize next.\n\n"
+        "If you're here for agent memory, the quickstart in the docs is the fastest path; "
+        "if you're evaluating team memory, the Cloud onboarding contract has the details.\n\n"
+        "— Thomas"
+    )
+    sent = await send_email(
+        email,
+        "Welcome to Perseus — what are you building?",
+        body,
+        from_email=FOUNDER_FROM_EMAIL,
+        reply_to=FOUNDER_REPLY_TO,
+    )
+    logger.info("founder_welcome_email", extra={
+        "to": _redact_email(email), "sent": sent,
+    })
+    return sent
 
 
 # ── Token helpers ────────────────────────────────────────────────────────────
@@ -209,6 +251,7 @@ async def handle_register(request: Request) -> JSONResponse:
         email, password_hash, tenant_id,
         plan=onboarding["plan"], seat_count=onboarding["seat_count"],
     )
+    await funnel.try_record(tenant_id, "signup_created", "web")
 
     # Generate verification token
     ver_token = make_verification_token()
@@ -230,9 +273,14 @@ async def handle_register(request: Request) -> JSONResponse:
         "user_id": user_id, "email": _redact_email(email), "email_sent": email_sent,
     })
 
+    # Founder welcome email (#7): independent of verification delivery,
+    # best-effort, plain text, reply-to a human.
+    welcome_sent = await send_founder_welcome(email)
+
     return JSONResponse({
         "message": "Account created. Check your email to verify your address.",
         "email_sent": email_sent,
+        "welcome_email_sent": welcome_sent,
         "tenant_id": tenant_id,
         "onboarding": {
             **onboarding,
@@ -254,6 +302,9 @@ async def handle_verify_email(request: Request) -> JSONResponse:
 
     await verify_user_email(row["user_id"])
     logger.info("email_verified", extra={"user_id": row["user_id"]})
+    user = await get_user_by_id(row["user_id"])
+    if user:
+        await funnel.try_record(user["tenant_id"], "email_verified", "email")
 
     return JSONResponse({"message": "Email verified. You can now log in."})
 
@@ -280,6 +331,7 @@ async def handle_login(request: Request) -> JSONResponse:
     await create_session(user["id"], session_token, expires)
 
     logger.info("user_login", extra={"user_id": user["id"], "email": _redact_email(email)})
+    await funnel.try_record(user["tenant_id"], "login_succeeded", "web")
 
     resp = JSONResponse({
         "token": session_token,
@@ -377,11 +429,17 @@ async def handle_password_reset_confirm(request: Request) -> JSONResponse:
 
 
 async def handle_onboarding(request: Request) -> JSONResponse:
-    """GET /api/accounts/onboarding — return the authenticated tenant contract."""
+    """GET /api/accounts/onboarding — return the authenticated tenant contract.
+
+    The dashboard renders onboarding from this response, so a successful
+    authenticated render here is exactly the 'dashboard_opened' funnel
+    signal — it can only fire after authentication and a real render (#4).
+    """
     user = await authenticate_user(request)
     plan = user.get("plan", "free")
     seats = int(user.get("seat_count", 1))
     onboarding = onboarding_plan(plan, seats)
+    await funnel.try_record(user["tenant_id"], "dashboard_opened", "web")
     return JSONResponse({
         "tenant_id": user["tenant_id"],
         "email_verified": bool(user["is_verified"]),
@@ -393,12 +451,23 @@ async def handle_onboarding(request: Request) -> JSONResponse:
     })
 
 
+async def handle_audit_link_click(request: Request) -> JSONResponse:
+    """POST /api/accounts/audit-link-click — record a Plutus audit-link click.
+
+    Authenticated dashboard call when the tenant follows the audit link;
+    returns the audit URL so the client can navigate after recording (#4).
+    """
+    user = await authenticate_user(request)
+    await funnel.try_record(user["tenant_id"], "plutus_audit_link_clicked", "web")
+    return JSONResponse({"audit_endpoint": "/api/v1/audit"})
+
+
 async def handle_api_key_create(request: Request) -> JSONResponse:
     """POST /api/accounts/api-keys — Create a new API key for the authenticated user."""
     user = await authenticate_user(request)
 
     api_key = "pcs_" + secrets.token_hex(24)
-    await db_create_api_key(api_key, tier="starter")
+    await db_create_api_key(api_key, tier="starter", tenant_id=user["tenant_id"])
 
     logger.info("api_key_created", extra={"user_id": user["id"]})
 

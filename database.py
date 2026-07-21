@@ -83,6 +83,18 @@ async def init_db() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+        # Privacy-safe activation funnel (issue #4). The schema is the privacy
+        # boundary: internal tenant id, event name, coarse source label,
+        # timestamp — and nothing else. No payload columns exist.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS funnel_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'system',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         # Additive onboarding columns for existing deployments.
         for column, definition in (
             ("plan", "TEXT NOT NULL DEFAULT 'free'"),
@@ -92,6 +104,12 @@ async def init_db() -> None:
                 await db.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
             except Exception:
                 pass  # already migrated
+        # Link API keys to the owning tenant so first-usage funnel events can
+        # be correlated by internal tenant id (issue #4).
+        try:
+            await db.execute("ALTER TABLE api_keys ADD COLUMN tenant_id TEXT")
+        except Exception:
+            pass  # already migrated
         await db.commit()
     finally:
         await db.close()
@@ -161,7 +179,7 @@ async def get_api_key_info(key: str) -> dict | None:
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT key, tier, stripe_customer_id, stripe_subscription_id, created_at, is_active "
+            "SELECT key, tier, stripe_customer_id, stripe_subscription_id, created_at, is_active, tenant_id "
             "FROM api_keys WHERE key = ? AND is_active = 1",
             (key,),
         )
@@ -178,14 +196,15 @@ async def create_api_key(
     tier: str = "starter",
     stripe_customer_id: str | None = None,
     stripe_subscription_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
-    """Insert a new API key."""
+    """Insert a new API key, optionally linked to an internal tenant id."""
     db = await get_db()
     try:
         await db.execute(
-            "INSERT OR REPLACE INTO api_keys (key, tier, stripe_customer_id, stripe_subscription_id) "
-            "VALUES (?, ?, ?, ?)",
-            (key, tier, stripe_customer_id, stripe_subscription_id),
+            "INSERT OR REPLACE INTO api_keys (key, tier, stripe_customer_id, stripe_subscription_id, tenant_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (key, tier, stripe_customer_id, stripe_subscription_id, tenant_id),
         )
         await db.execute(
             "INSERT OR IGNORE INTO usage (api_key) VALUES (?)",
