@@ -1,6 +1,6 @@
 # Perseus Cloud API
 
-Hosted Mimir persistent-memory API with Stripe subscriptions.
+Hosted Perseus Vault persistent-memory API with Stripe subscriptions.
 Production: `https://cloud-api.perseus.observer` (FastAPI/uvicorn behind Cloudflare).
 
 ## Health endpoint contract (stable, unauthenticated)
@@ -18,8 +18,8 @@ Production: `https://cloud-api.perseus.observer` (FastAPI/uvicorn behind Cloudfl
 
 | Field | Values | Meaning |
 |---|---|---|
-| `status` | `healthy` / `degraded` | `degraded` when the Vault (Mimir) backend is disconnected |
-| `mimir` | `connected` / `disconnected` | live state of the Vault connection |
+| `status` | `healthy` / `degraded` | `degraded` when the Vault backend is disconnected |
+| `mimir` | `connected` / `disconnected` | live state of the Vault connection (legacy response-field name) |
 | `version` | semver string | API version |
 
 - **Side effect:** when the Vault connection is down, one serialized reconnect
@@ -36,7 +36,7 @@ Production: `https://cloud-api.perseus.observer` (FastAPI/uvicorn behind Cloudfl
 | `https://cloud-api.perseus.observer/api/health` | 200 + `"status": "healthy"` | this contract |
 | `https://plutus.perseus.observer/healthz` | 200 + `"ok": true` | minimal liveness `{ok, version, demo}`; no data/balances/orgs |
 | `https://perseus.observer/cloud/signup` | 301 → `/cloud/signup/` → 200 | follow redirects, expect final 200 |
-| `https://vault.perseus.observer/message` | 401 unauthenticated | bearer-protected by design; monitor with an authenticated JSON-RPC `tools/call` (`mimir_health`) or explicitly accept 401 — never weaken auth for monitoring |
+| `https://vault.perseus.observer/message` | 401 unauthenticated | bearer-protected by design; monitor with an authenticated JSON-RPC `tools/call` (`perseus_vault_health`; legacy aliases remain supported) or explicitly accept 401 — never weaken auth for monitoring |
 Hosted Perseus Vault with Stripe subscriptions and user account management.
 Production: `https://cloud-api.perseus.observer` (Docker, port 8080, see `docker-compose.production.yml`).
 
@@ -48,7 +48,7 @@ Production: `https://cloud-api.perseus.observer` (Docker, port 8080, see `docker
 | Auth | **None required** (safe for public uptime probes) |
 | Success | HTTP 200 |
 | Body | `{"status": "healthy" \| "degraded", "mimir": "connected" \| "disconnected", "version": "1.0.0"}` |
-| `status` | `healthy` when the embedded Vault (mimir) client is connected, else `degraded` — HTTP stays 200 either way |
+| `status` | `healthy` when the embedded Vault client is connected, else `degraded` — HTTP stays 200 either way |
 | Side effects | One serialized Vault reconnect attempt if the connection was lost |
 
 Monitoring guidance: expect HTTP 200 and match `\"status\":\"healthy\"` in the body.
